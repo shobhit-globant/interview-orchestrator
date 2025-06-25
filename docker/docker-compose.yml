@@ -3,6 +3,7 @@ version: '3.8'
 services:
   postgres:
     image: postgres:15
+    container_name: interview_orchestrator_db
     environment:
       POSTGRES_DB: interview_orchestrator
       POSTGRES_USER: postgres
@@ -11,17 +12,94 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  api:
+  redis:
+    image: redis:7-alpine
+    container_name: interview_orchestrator_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    container_name: interview_orchestrator_app
     ports:
       - "8000:8000"
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/interview_orchestrator
+      - DEBUG=True
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../app:/app/app
+    command: ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
 volumes:
   postgres_data:
+  redis_data:
+
+
+# Makefile
+.PHONY: help install dev test lint format clean migrate seed
+
+help: ## Show this help message
+	@echo "Available commands:"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $1, $2}'
+
+install: ## Install dependencies
+	uv sync
+
+dev: ## Start development server
+	uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+test: ## Run tests
+	uv run pytest
+
+lint: ## Run linting
+	uv run black --check app/
+	uv run isort --check-only app/
+
+format: ## Format code
+	uv run black app/
+	uv run isort app/
+
+clean: ## Clean cache files
+	find . -type d -name __pycache__ -exec rm -rf {} +
+	find . -type f -name "*.pyc" -delete
+
+migrate: ## Run database migrations
+	uv run python scripts/run_migrations.py
+
+seed: ## Seed initial data
+	uv run python scripts/init_db.py
+
+docker-up: ## Start Docker services
+	docker-compose -f docker/docker-compose.yml up -d
+
+docker-down: ## Stop Docker services
+	docker-compose -f docker/docker-compose.yml down
+
+docker-logs: ## View Docker logs
+	docker-compose -f docker/docker-compose.yml logs -f
+
+init-alembic: ## Initialize Alembic
+	uv run alembic init alembic
+
+create-migration: ## Create new migration (usage: make create-migration MESSAGE="description")
+	uv run python scripts/create_migration.py "$(MESSAGE)"
